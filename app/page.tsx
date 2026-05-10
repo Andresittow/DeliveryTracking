@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -27,6 +27,9 @@ interface Position {
   y: number
 }
 
+// URL del WebSocket - configura en Settings > Vars > NEXT_PUBLIC_WEBSOCKET_URL
+const WEBSOCKET_URL = process.env.NEXT_PUBLIC_WEBSOCKET_URL || "wss://dawdayljf4.execute-api.us-east-1.amazonaws.com/production/"
+
 export default function OperationsDashboard() {
   const [orderId, setOrderId] = useState("ORD-456")
   const [isConnected, setIsConnected] = useState(false)
@@ -36,10 +39,13 @@ export default function OperationsDashboard() {
   const [error429Count, setError429Count] = useState(0)
   const [isExecutingBurst, setIsExecutingBurst] = useState(false)
   const [orderInputId, setOrderInputId] = useState("")
+  const [connectionError, setConnectionError] = useState<string | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
 
-  // Simulate courier movement when connected
+  // Simular movimiento del courier solo si no hay WebSocket real configurado
   useEffect(() => {
-    if (!isConnected) return
+    // Solo simular si está conectado Y no hay URL de WebSocket configurada
+    if (!isConnected || WEBSOCKET_URL) return
 
     const interval = setInterval(() => {
       setCourierPosition(prev => {
@@ -55,19 +61,98 @@ export default function OperationsDashboard() {
     return () => clearInterval(interval)
   }, [isConnected])
 
-  const handleConnect = useCallback(() => {
-    if (orderInputId.trim()) {
-      setOrderId(orderInputId)
+  // Limpiar WebSocket al desmontar el componente
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close()
+      }
     }
-    setIsConnected(true)
+  }, [])
+
+  const handleConnect = useCallback(() => {
+    const currentOrderId = orderInputId.trim() || "ORD-456"
+    setOrderId(currentOrderId)
+    setConnectionError(null)
     setCourierPosition({ x: 50, y: 300 })
     setPathHistory([{ x: 50, y: 300 }])
+
+    // Si hay URL de WebSocket configurada, conectar al servidor real
+    if (WEBSOCKET_URL) {
+      try {
+        // Cerrar conexión anterior si existe
+        if (wsRef.current) {
+          wsRef.current.close()
+        }
+
+        const wsUrl = `${WEBSOCKET_URL}?orderId=${encodeURIComponent(currentOrderId)}`
+        const ws = new WebSocket(wsUrl)
+
+        ws.onopen = () => {
+          console.log("[v0] WebSocket conectado a:", wsUrl)
+          setIsConnected(true)
+          setConnectionError(null)
+        }
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data)
+            console.log("[v0] Mensaje recibido:", data)
+            
+            // Actualizar posición del courier si el mensaje contiene coordenadas
+            if (data.x !== undefined && data.y !== undefined) {
+              const newPos = { x: data.x, y: data.y }
+              setCourierPosition(newPos)
+              setPathHistory(prev => [...prev, newPos])
+            }
+            
+            // Manejar otros tipos de mensajes según tu protocolo
+            if (data.type === "position") {
+              const newPos = { x: data.position.x, y: data.position.y }
+              setCourierPosition(newPos)
+              setPathHistory(prev => [...prev, newPos])
+            }
+          } catch (e) {
+            console.log("[v0] Mensaje no-JSON recibido:", event.data)
+          }
+        }
+
+        ws.onerror = (error) => {
+          console.error("[v0] Error de WebSocket:", error)
+          setConnectionError("Error de conexión al WebSocket")
+          setIsConnected(false)
+        }
+
+        ws.onclose = (event) => {
+          console.log("[v0] WebSocket cerrado:", event.code, event.reason)
+          setIsConnected(false)
+          if (event.code !== 1000) {
+            setConnectionError(`Conexión cerrada: ${event.reason || "Sin razón"}`)
+          }
+        }
+
+        wsRef.current = ws
+      } catch (error) {
+        console.error("[v0] Error al crear WebSocket:", error)
+        setConnectionError("No se pudo conectar al WebSocket")
+      }
+    } else {
+      // Modo simulación si no hay URL configurada
+      console.log("[v0] Modo simulación - No hay NEXT_PUBLIC_WEBSOCKET_URL configurada")
+      setIsConnected(true)
+    }
   }, [orderInputId])
 
   const handleFinishDelivery = useCallback(() => {
+    // Cerrar conexión WebSocket si existe
+    if (wsRef.current) {
+      wsRef.current.close(1000, "Entrega finalizada")
+      wsRef.current = null
+    }
     setIsConnected(false)
     setPathHistory([])
     setCourierPosition({ x: 50, y: 300 })
+    setConnectionError(null)
   }, [])
 
   const addLog = useCallback((message: string, type: "success" | "error") => {
@@ -291,6 +376,19 @@ export default function OperationsDashboard() {
                   <p className="text-sm text-success flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
                     Seguimiento activo: {orderId}
+                  </p>
+                  {!WEBSOCKET_URL && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Modo simulación (sin WebSocket)
+                    </p>
+                  )}
+                </div>
+              )}
+              {connectionError && (
+                <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/30">
+                  <p className="text-sm text-destructive flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4" />
+                    {connectionError}
                   </p>
                 </div>
               )}
