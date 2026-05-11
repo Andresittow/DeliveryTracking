@@ -27,7 +27,7 @@ interface Position {
   y: number
 }
 
-// 1. CORRECCIÓN: URL sin el slash "/" al final
+// URL del WebSocket oficial de tu API Gateway
 const WEBSOCKET_URL = process.env.NEXT_PUBLIC_WEBSOCKET_URL || "wss://dawdayljf4.execute-api.us-east-1.amazonaws.com/production"
 
 export default function OperationsDashboard() {
@@ -63,7 +63,6 @@ export default function OperationsDashboard() {
           wsRef.current.close()
         }
 
-        // Se envía el orderId en la cadena de consulta para que la Lambda lo acepte
         const wsUrl = `${WEBSOCKET_URL}?orderId=${encodeURIComponent(currentOrderId)}`
         const ws = new WebSocket(wsUrl)
 
@@ -76,9 +75,6 @@ export default function OperationsDashboard() {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data)
-            console.log("Mensaje recibido desde AWS:", data)
-            
-            // Adaptación de los datos reales de tu Lambda (lat y lng) al mapa de la UI
             if (data.lat !== undefined && data.lng !== undefined) {
               const newPos = { x: data.lng, y: data.lat }
               setCourierPosition(newPos)
@@ -99,7 +95,7 @@ export default function OperationsDashboard() {
           console.log("WebSocket cerrado:", event.code, event.reason)
           setIsConnected(false)
           if (event.code !== 1000) {
-            setConnectionError(`Conexión cerrada: AWS lo desconectó`)
+            setConnectionError(`Conexión cerrada: Error interno en AWS (Verificar logs de Lambda)`)
           }
         }
 
@@ -110,14 +106,12 @@ export default function OperationsDashboard() {
     }
   }, [orderInputId])
 
-  // 2. CORRECCIÓN: Envío real de la Transacción Atómica a AWS
   const handleFinishDelivery = useCallback(() => {
     if (wsRef.current && isConnected) {
-      console.log("Enviando evento complete-delivery a AWS...")
       wsRef.current.send(JSON.stringify({
         action: "complete-delivery",
         orderId: orderId,
-        courierId: "repartidor-01" // Tu repartidor de prueba en DynamoDB
+        courierId: "repartidor-01" 
       }))
       
       wsRef.current.close(1000, "Entrega finalizada por el operador")
@@ -136,27 +130,25 @@ export default function OperationsDashboard() {
       type,
       timestamp: new Date()
     }
-    setLogs(prev => [...prev.slice(-50), entry])
+    setLogs(prev => [...prev.slice(-80), entry])
     if (type === "error" && message.includes("429")) {
       setError429Count(prev => prev + 1)
     }
   }, [])
 
-  // 3. CORRECCIÓN: Peticiones HTTP reales a NGINX
   const executeBurst = useCallback(async () => {
     setIsExecutingBurst(true)
     setLogs([])
     setError429Count(0)
 
-    // Aumentamos a 50 peticiones para desbordar sin piedad el 'burst' de 20 de NGINX
-    const totalRequests = 50; 
+    // Aumentamos a 100 para saturar definitivamente el límite del navegador y de NGINX
+    const totalRequests = 100; 
+    
+    // Usamos el origin actual automáticamente (tu IP dinámica de EC2)
+    const serverUrl = window.location.origin;
 
-    const EC2_IP = "http://107.20.11.37"; 
-
-    // Creamos un array de promesas para dispararlas TODAS en paralelo
     const promises = Array.from({ length: totalRequests }).map((_, i) => {
-      // El query params '?t=' evita que el navegador las ponga en fila (cache/queue)
-      return fetch(`${EC2_IP}/?t=${Date.now()}_${i}`, { cache: 'no-store' })
+      return fetch(`${serverUrl}/?t=${Date.now()}_${i}`, { cache: 'no-store' })
         .then(response => {
           if (response.status === 429) {
             addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Bloqueado por NGINX (429 Too Many Requests)`, "error")
@@ -165,13 +157,11 @@ export default function OperationsDashboard() {
           }
         })
         .catch(err => {
-          addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Fallo de red`, "error")
+          addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Rechazada violentamente por el firewall`, "error")
         });
     });
 
-    // Esperamos a que todo el "cañonazo" termine
-    await Promise.all(promises);
-
+    await Promise.allSettled(promises);
     setTimeout(() => setIsExecutingBurst(false), 1000)
   }, [addLog])
 
