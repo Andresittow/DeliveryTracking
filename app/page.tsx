@@ -27,8 +27,8 @@ interface Position {
   y: number
 }
 
-// URL del WebSocket - configura en Settings > Vars > NEXT_PUBLIC_WEBSOCKET_URL
-const WEBSOCKET_URL = process.env.NEXT_PUBLIC_WEBSOCKET_URL || "wss://dawdayljf4.execute-api.us-east-1.amazonaws.com/production/"
+// 1. CORRECCIÓN: URL sin el slash "/" al final
+const WEBSOCKET_URL = process.env.NEXT_PUBLIC_WEBSOCKET_URL || "wss://dawdayljf4.execute-api.us-east-1.amazonaws.com/production"
 
 export default function OperationsDashboard() {
   const [orderId, setOrderId] = useState("ORD-456")
@@ -42,26 +42,6 @@ export default function OperationsDashboard() {
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
-  // Simular movimiento del courier solo si no hay WebSocket real configurado
-  useEffect(() => {
-    // Solo simular si está conectado Y no hay URL de WebSocket configurada
-    if (!isConnected || WEBSOCKET_URL) return
-
-    const interval = setInterval(() => {
-      setCourierPosition(prev => {
-        const newX = Math.min(prev.x + Math.random() * 30, 550)
-        const newY = prev.y + (Math.random() - 0.5) * 40
-        const clampedY = Math.max(50, Math.min(350, newY))
-        const newPos = { x: newX, y: clampedY }
-        setPathHistory(history => [...history, newPos])
-        return newPos
-      })
-    }, 1500)
-
-    return () => clearInterval(interval)
-  }, [isConnected])
-
-  // Limpiar WebSocket al desmontar el componente
   useEffect(() => {
     return () => {
       if (wsRef.current) {
@@ -77,19 +57,18 @@ export default function OperationsDashboard() {
     setCourierPosition({ x: 50, y: 300 })
     setPathHistory([{ x: 50, y: 300 }])
 
-    // Si hay URL de WebSocket configurada, conectar al servidor real
     if (WEBSOCKET_URL) {
       try {
-        // Cerrar conexión anterior si existe
         if (wsRef.current) {
           wsRef.current.close()
         }
 
+        // Se envía el orderId en la cadena de consulta para que la Lambda lo acepte
         const wsUrl = `${WEBSOCKET_URL}?orderId=${encodeURIComponent(currentOrderId)}`
         const ws = new WebSocket(wsUrl)
 
         ws.onopen = () => {
-          console.log("[v0] WebSocket conectado a:", wsUrl)
+          console.log("WebSocket conectado a:", wsUrl)
           setIsConnected(true)
           setConnectionError(null)
         }
@@ -97,63 +76,58 @@ export default function OperationsDashboard() {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data)
-            console.log("[v0] Mensaje recibido:", data)
+            console.log("Mensaje recibido desde AWS:", data)
             
-            // Actualizar posición del courier si el mensaje contiene coordenadas
-            if (data.x !== undefined && data.y !== undefined) {
-              const newPos = { x: data.x, y: data.y }
-              setCourierPosition(newPos)
-              setPathHistory(prev => [...prev, newPos])
-            }
-            
-            // Manejar otros tipos de mensajes según tu protocolo
-            if (data.type === "position") {
-              const newPos = { x: data.position.x, y: data.position.y }
+            // Adaptación de los datos reales de tu Lambda (lat y lng) al mapa de la UI
+            if (data.lat !== undefined && data.lng !== undefined) {
+              const newPos = { x: data.lng, y: data.lat }
               setCourierPosition(newPos)
               setPathHistory(prev => [...prev, newPos])
             }
           } catch (e) {
-            console.log("[v0] Mensaje no-JSON recibido:", event.data)
+            console.log("Mensaje no-JSON recibido:", event.data)
           }
         }
 
         ws.onerror = (error) => {
-          console.error("[v0] Error de WebSocket:", error)
+          console.error("Error de WebSocket:", error)
           setConnectionError("Error de conexión al WebSocket")
           setIsConnected(false)
         }
 
         ws.onclose = (event) => {
-          console.log("[v0] WebSocket cerrado:", event.code, event.reason)
+          console.log("WebSocket cerrado:", event.code, event.reason)
           setIsConnected(false)
           if (event.code !== 1000) {
-            setConnectionError(`Conexión cerrada: ${event.reason || "Sin razón"}`)
+            setConnectionError(`Conexión cerrada: AWS lo desconectó`)
           }
         }
 
         wsRef.current = ws
       } catch (error) {
-        console.error("[v0] Error al crear WebSocket:", error)
-        setConnectionError("No se pudo conectar al WebSocket")
+        setConnectionError("No se pudo instanciar el WebSocket")
       }
-    } else {
-      // Modo simulación si no hay URL configurada
-      console.log("[v0] Modo simulación - No hay NEXT_PUBLIC_WEBSOCKET_URL configurada")
-      setIsConnected(true)
     }
   }, [orderInputId])
 
+  // 2. CORRECCIÓN: Envío real de la Transacción Atómica a AWS
   const handleFinishDelivery = useCallback(() => {
-    // Cerrar conexión WebSocket si existe
-    if (wsRef.current) {
-      wsRef.current.close(1000, "Entrega finalizada")
+    if (wsRef.current && isConnected) {
+      console.log("Enviando evento complete-delivery a AWS...")
+      wsRef.current.send(JSON.stringify({
+        action: "complete-delivery",
+        orderId: orderId,
+        courierId: "repartidor-01" // Tu repartidor de prueba en DynamoDB
+      }))
+      
+      wsRef.current.close(1000, "Entrega finalizada por el operador")
       wsRef.current = null
     }
     setIsConnected(false)
     setPathHistory([])
     setCourierPosition({ x: 50, y: 300 })
     setConnectionError(null)
-  }, [])
+  }, [isConnected, orderId])
 
   const addLog = useCallback((message: string, type: "success" | "error") => {
     const entry: LogEntry = {
@@ -163,62 +137,69 @@ export default function OperationsDashboard() {
       timestamp: new Date()
     }
     setLogs(prev => [...prev.slice(-50), entry])
-    if (type === "error") {
+    if (type === "error" && message.includes("429")) {
       setError429Count(prev => prev + 1)
     }
   }, [])
 
+  // 3. CORRECCIÓN: Peticiones HTTP reales a NGINX
   const executeBurst = useCallback(async () => {
     setIsExecutingBurst(true)
     setLogs([])
     setError429Count(0)
 
-    // Simulate 30 rapid requests - first 20 succeed (burst limit), then rate limited
-    const totalRequests = 30
-    let successCount = 0
-    const burstLimit = 20 // 10 req/s + burst of 20
+    const totalRequests = 35
+    
+    // --- ¡IMPORTANTE! CAMBIA ESTA IP POR LA TUYA DE AWS EC2 ---
+    const EC2_IP = "http://107.20.11.37/" 
 
     for (let i = 0; i < totalRequests; i++) {
-      await new Promise(resolve => setTimeout(resolve, 80))
+      // Usamos no-store para evitar que el navegador cachee y nos engañe
+      fetch(EC2_IP, { cache: 'no-store' })
+        .then(response => {
+          if (response.status === 429) {
+            addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Bloqueado por NGINX (429 Too Many Requests)`, "error")
+          } else {
+            addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} enviada (${response.status} OK)`, "success")
+          }
+        })
+        .catch(err => {
+          addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Ignorando CORS para prueba de estrés...`, "error")
+        });
       
-      if (successCount < burstLimit && Math.random() > 0.1) {
-        addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} enviada (200 OK)`, "success")
-        successCount++
-      } else {
-        addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Bloqueado por Rate Limit (429 Too Many Requests)`, "error")
-      }
+      // Una mínima pausa de 15 milisegundos para generar la "ráfaga"
+      await new Promise(resolve => setTimeout(resolve, 15))
     }
 
-    setIsExecutingBurst(false)
+    setTimeout(() => setIsExecutingBurst(false), 1000)
   }, [addLog])
 
   return (
-    <div className="min-h-screen p-6">
-      {/* Header */}
+    <div className="min-h-screen p-6 bg-[#09090b]">
       <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
-        <h1 className="text-2xl sm:text-3xl font-bold text-foreground">
+        <h1 className="text-2xl sm:text-3xl font-bold text-white">
           Panel de Monitoreo de Pedidos
         </h1>
         <div className="flex items-center gap-3">
-          <span className="text-sm text-muted-foreground">
+          <span className="text-sm text-gray-400">
             Estado de la Conexión WebSocket
           </span>
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${
             isConnected 
-              ? "bg-success/20 text-success" 
-              : "bg-destructive/20 text-destructive"
+              ? "bg-green-500/20 text-green-400" 
+              : "bg-red-500/20 text-red-400"
           }`}>
             {isConnected ? (
               <>
                 <Wifi className="w-4 h-4" />
                 <span className="text-sm font-medium">Conexión activa</span>
-                <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
               </>
             ) : (
               <>
                 <WifiOff className="w-4 h-4" />
                 <span className="text-sm font-medium">No conectado</span>
-                <span className="w-2 h-2 rounded-full bg-destructive" />
+                <span className="w-2 h-2 rounded-full bg-red-500" />
               </>
             )}
           </div>
@@ -226,33 +207,24 @@ export default function OperationsDashboard() {
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Central Map View */}
         <div className="lg:col-span-2">
-          <Card className="bg-card/50 backdrop-blur-xl border-border/50 shadow-2xl">
+          <Card className="bg-[#18181b]/50 backdrop-blur-xl border-gray-800 shadow-2xl">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-foreground">
-                <MapPin className="w-5 h-5 text-primary" />
+              <CardTitle className="flex items-center gap-2 text-white">
+                <MapPin className="w-5 h-5 text-blue-500" />
                 Mapa de Seguimiento - Pedido {orderId}
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="relative w-full h-[400px] bg-secondary/30 rounded-lg overflow-hidden border border-border/30">
-                {/* Grid pattern */}
+              <div className="relative w-full h-[400px] bg-black/30 rounded-lg overflow-hidden border border-gray-800">
                 <svg className="absolute inset-0 w-full h-full" xmlns="http://www.w3.org/2000/svg">
                   <defs>
                     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                      <path 
-                        d="M 40 0 L 0 0 0 40" 
-                        fill="none" 
-                        stroke="currentColor" 
-                        strokeWidth="0.5"
-                        className="text-border/40"
-                      />
+                      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-gray-800" />
                     </pattern>
                   </defs>
                   <rect width="100%" height="100%" fill="url(#grid)" />
                   
-                  {/* Path trace */}
                   {pathHistory.length > 1 && (
                     <polyline
                       points={pathHistory.map(p => `${p.x},${p.y}`).join(" ")}
@@ -262,69 +234,40 @@ export default function OperationsDashboard() {
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       strokeDasharray="5,5"
-                      className="text-primary/60"
+                      className="text-blue-500/60"
                     />
                   )}
                   
-                  {/* Path dots */}
                   {pathHistory.map((pos, index) => (
-                    <circle
-                      key={index}
-                      cx={pos.x}
-                      cy={pos.y}
-                      r={index === pathHistory.length - 1 ? 0 : 3}
-                      className="fill-primary/40"
-                    />
+                    <circle key={index} cx={pos.x} cy={pos.y} r={index === pathHistory.length - 1 ? 0 : 3} className="fill-blue-500/40" />
                   ))}
                 </svg>
 
-                {/* Start marker */}
-                <div 
-                  className="absolute flex items-center justify-center w-8 h-8 rounded-full bg-success/20 border-2 border-success"
-                  style={{ left: 50 - 16, top: 300 - 16 }}
-                >
-                  <Package className="w-4 h-4 text-success" />
+                <div className="absolute flex items-center justify-center w-8 h-8 rounded-full bg-green-500/20 border-2 border-green-500" style={{ left: 50 - 16, top: 300 - 16 }}>
+                  <Package className="w-4 h-4 text-green-500" />
                 </div>
 
-                {/* Destination marker */}
-                <div 
-                  className="absolute flex items-center justify-center w-8 h-8 rounded-full bg-primary/20 border-2 border-primary"
-                  style={{ left: 550 - 16, top: 150 - 16 }}
-                >
-                  <CheckCircle2 className="w-4 h-4 text-primary" />
+                <div className="absolute flex items-center justify-center w-8 h-8 rounded-full bg-blue-500/20 border-2 border-blue-500" style={{ left: 550 - 16, top: 150 - 16 }}>
+                  <CheckCircle2 className="w-4 h-4 text-blue-500" />
                 </div>
 
-                {/* Courier icon */}
                 {isConnected && (
-                  <div 
-                    className="absolute transition-all duration-1000 ease-out"
-                    style={{ 
-                      left: courierPosition.x - 20, 
-                      top: courierPosition.y - 20 
-                    }}
-                  >
+                  <div className="absolute transition-all duration-1000 ease-out" style={{ left: courierPosition.x - 20, top: courierPosition.y - 20 }}>
                     <div className="relative">
-                      <div className="absolute inset-0 w-10 h-10 rounded-full bg-primary/30 animate-ping" />
-                      <div className="relative w-10 h-10 rounded-full bg-primary flex items-center justify-center shadow-lg shadow-primary/50">
-                        <Bike className="w-5 h-5 text-primary-foreground" />
+                      <div className="absolute inset-0 w-10 h-10 rounded-full bg-blue-500/30 animate-ping" />
+                      <div className="relative w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center shadow-lg shadow-blue-500/50">
+                        <Bike className="w-5 h-5 text-white" />
                       </div>
                     </div>
                   </div>
                 )}
 
-                {/* Labels */}
-                <div className="absolute top-4 left-4 px-2 py-1 bg-background/80 backdrop-blur rounded text-xs text-muted-foreground">
-                  Origen
-                </div>
-                <div className="absolute top-[120px] right-4 px-2 py-1 bg-background/80 backdrop-blur rounded text-xs text-muted-foreground">
-                  Destino
-                </div>
+                <div className="absolute top-4 left-4 px-2 py-1 bg-black/80 backdrop-blur rounded text-xs text-gray-400">Origen</div>
+                <div className="absolute top-[120px] right-4 px-2 py-1 bg-black/80 backdrop-blur rounded text-xs text-gray-400">Destino</div>
 
                 {!isConnected && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-background/50 backdrop-blur-sm">
-                    <p className="text-muted-foreground text-lg">
-                      Conecte a una orden para ver el seguimiento
-                    </p>
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                    <p className="text-gray-400 text-lg">Conecte a una orden para ver el seguimiento</p>
                   </div>
                 )}
               </div>
@@ -332,31 +275,29 @@ export default function OperationsDashboard() {
           </Card>
         </div>
 
-        {/* Right Sidebar */}
         <div className="space-y-6">
-          {/* Order Controls */}
-          <Card className="bg-card/50 backdrop-blur-xl border-border/50 shadow-2xl">
+          <Card className="bg-[#18181b]/50 backdrop-blur-xl border-gray-800 shadow-2xl">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-foreground">
-                <Package className="w-5 h-5 text-primary" />
+              <CardTitle className="flex items-center gap-2 text-white">
+                <Package className="w-5 h-5 text-blue-500" />
                 Controles del Pedido
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <label className="text-sm text-muted-foreground">ID del Pedido</label>
+                <label className="text-sm text-gray-400">ID del Pedido</label>
                 <Input
                   placeholder="Ingresar ID del Pedido"
                   value={orderInputId}
                   onChange={(e) => setOrderInputId(e.target.value)}
-                  className="bg-input border-border/50 focus:border-primary"
+                  className="bg-black border-gray-800 focus:border-blue-500 text-white"
                 />
               </div>
               <div className="grid grid-cols-1 gap-3">
                 <Button
                   onClick={handleConnect}
                   disabled={isConnected}
-                  className="w-full bg-primary hover:bg-primary/90 text-primary-foreground"
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white"
                 >
                   <Wifi className="w-4 h-4 mr-2" />
                   Conectar a la Orden
@@ -365,28 +306,23 @@ export default function OperationsDashboard() {
                   onClick={handleFinishDelivery}
                   disabled={!isConnected}
                   variant="outline"
-                  className="w-full border-border/50 hover:bg-secondary"
+                  className="w-full border-gray-800 hover:bg-gray-800 text-white"
                 >
                   <CheckCircle2 className="w-4 h-4 mr-2" />
-                  Finalizar Entrega
+                  Finalizar Entrega (Activar Transacción)
                 </Button>
               </div>
               {isConnected && (
-                <div className="p-3 rounded-lg bg-success/10 border border-success/30">
-                  <p className="text-sm text-success flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
+                <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/30">
+                  <p className="text-sm text-green-400 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                     Seguimiento activo: {orderId}
                   </p>
-                  {!WEBSOCKET_URL && (
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Modo simulación (sin WebSocket)
-                    </p>
-                  )}
                 </div>
               )}
               {connectionError && (
-                <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/30">
-                  <p className="text-sm text-destructive flex items-center gap-2">
+                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30">
+                  <p className="text-sm text-red-400 flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4" />
                     {connectionError}
                   </p>
@@ -395,18 +331,17 @@ export default function OperationsDashboard() {
             </CardContent>
           </Card>
 
-          {/* Current Position Info */}
           {isConnected && (
-            <Card className="bg-card/50 backdrop-blur-xl border-border/50 shadow-2xl">
+            <Card className="bg-[#18181b]/50 backdrop-blur-xl border-gray-800 shadow-2xl">
               <CardContent className="pt-6">
                 <div className="grid grid-cols-2 gap-4 text-center">
-                  <div className="p-3 rounded-lg bg-secondary/50">
-                    <p className="text-xs text-muted-foreground">Posición X</p>
-                    <p className="text-lg font-mono text-foreground">{Math.round(courierPosition.x)}</p>
+                  <div className="p-3 rounded-lg bg-black">
+                    <p className="text-xs text-gray-400">Longitud (X)</p>
+                    <p className="text-lg font-mono text-white">{Math.round(courierPosition.x)}</p>
                   </div>
-                  <div className="p-3 rounded-lg bg-secondary/50">
-                    <p className="text-xs text-muted-foreground">Posición Y</p>
-                    <p className="text-lg font-mono text-foreground">{Math.round(courierPosition.y)}</p>
+                  <div className="p-3 rounded-lg bg-black">
+                    <p className="text-xs text-gray-400">Latitud (Y)</p>
+                    <p className="text-lg font-mono text-white">{Math.round(courierPosition.y)}</p>
                   </div>
                 </div>
               </CardContent>
@@ -414,56 +349,51 @@ export default function OperationsDashboard() {
           )}
         </div>
 
-        {/* Cloud Testing Panel - Full Width */}
         <div className="lg:col-span-3">
-          <Card className="bg-card/50 backdrop-blur-xl border-border/50 shadow-2xl">
+          <Card className="bg-[#18181b]/50 backdrop-blur-xl border-gray-800 shadow-2xl">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-foreground">
-                <Zap className="w-5 h-5 text-warning" />
-                Prueba de Estrés y Validación Cloud
+              <CardTitle className="flex items-center gap-2 text-white">
+                <Zap className="w-5 h-5 text-yellow-500" />
+                Prueba de Estrés y Validación Cloud (NGINX Rate Limit)
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                Esta herramienta valida el comportamiento del rate-limiting de NGINX configurado 
-                a 10 peticiones por segundo con una ráfaga máxima de 20 peticiones. 
-                Al ejecutar la prueba, se simularán múltiples peticiones rápidas para 
-                demostrar cómo el servidor responde cuando se excede el límite.
+              <p className="text-sm text-gray-400">
+                Esta herramienta dispara peticiones HTTP reales a tu instancia EC2. NGINX está configurado para permitir 10 peticiones por segundo. Observa cómo rechaza el exceso de tráfico.
               </p>
 
               <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
                 <Button
                   onClick={executeBurst}
                   disabled={isExecutingBurst}
-                  className="bg-destructive hover:bg-destructive/90 text-destructive-foreground px-6 py-3 text-base shadow-lg shadow-destructive/30"
+                  className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 text-base shadow-lg shadow-red-500/30"
                 >
                   <AlertTriangle className="w-5 h-5 mr-2" />
-                  {isExecutingBurst ? "Ejecutando..." : "Ejecutar Ráfaga de Peticiones (Simulación 429)"}
+                  {isExecutingBurst ? "Disparando peticiones..." : "Ejecutar Ráfaga de Peticiones HTTP"}
                 </Button>
                 
-                <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-secondary/50 border border-border/50">
-                  <span className="text-sm text-muted-foreground">
-                    Total de errores 429 detectados:
+                <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-black border border-gray-800">
+                  <span className="text-sm text-gray-400">
+                    Errores 429 Totales:
                   </span>
-                  <span className="text-xl font-bold font-mono text-destructive">
+                  <span className="text-xl font-bold font-mono text-red-500">
                     {error429Count}
                   </span>
                 </div>
               </div>
 
-              {/* Log Terminal */}
-              <div className="rounded-lg overflow-hidden border border-border/50">
-                <div className="flex items-center gap-2 px-4 py-2 bg-secondary/80 border-b border-border/50">
-                  <div className="w-3 h-3 rounded-full bg-destructive/80" />
-                  <div className="w-3 h-3 rounded-full bg-warning/80" />
-                  <div className="w-3 h-3 rounded-full bg-success/80" />
-                  <span className="ml-2 text-xs text-muted-foreground font-mono">
+              <div className="rounded-lg overflow-hidden border border-gray-800">
+                <div className="flex items-center gap-2 px-4 py-2 bg-[#27272a] border-b border-gray-800">
+                  <div className="w-3 h-3 rounded-full bg-red-500" />
+                  <div className="w-3 h-3 rounded-full bg-yellow-500" />
+                  <div className="w-3 h-3 rounded-full bg-green-500" />
+                  <span className="ml-2 text-xs text-gray-400 font-mono">
                     terminal - registro de peticiones
                   </span>
                 </div>
-                <div className="bg-[#0a0a0a] p-4 h-[200px] overflow-y-auto font-mono text-sm">
+                <div className="bg-black p-4 h-[200px] overflow-y-auto font-mono text-sm">
                   {logs.length === 0 ? (
-                    <p className="text-muted-foreground/50 italic">
+                    <p className="text-gray-500 italic">
                       Esperando ejecución de prueba de estrés...
                     </p>
                   ) : (
@@ -471,7 +401,7 @@ export default function OperationsDashboard() {
                       <div
                         key={log.id}
                         className={`mb-1 ${
-                          log.type === "success" ? "text-success" : "text-destructive"
+                          log.type === "success" ? "text-green-500" : "text-red-500"
                         }`}
                       >
                         {log.message}
