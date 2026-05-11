@@ -151,7 +151,7 @@ export default function OperationsDashboard() {
     // Aumentamos a 50 peticiones para desbordar sin piedad el 'burst' de 20 de NGINX
     const totalRequests = 50; 
 
-    const EC2_IP = "http://107.20.11.37/"; 
+    const EC2_IP = "http://107.20.11.37"; 
 
     // Creamos un array de promesas para dispararlas TODAS en paralelo
     const promises = Array.from({ length: totalRequests }).map((_, i) => {
