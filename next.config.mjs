@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: 'export', // <-- ESTO ES VITAL PARA DEPLOY EN NGINX
   typescript: {
     ignoreBuildErrors: true,
   },
