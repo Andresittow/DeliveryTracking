@@ -148,14 +148,15 @@ export default function OperationsDashboard() {
     setLogs([])
     setError429Count(0)
 
-    const totalRequests = 35
-    
-    // --- ¡IMPORTANTE! CAMBIA ESTA IP POR LA TUYA DE AWS EC2 ---
-    const EC2_IP = "http://107.20.11.37/" 
+    // Aumentamos a 50 peticiones para desbordar sin piedad el 'burst' de 20 de NGINX
+    const totalRequests = 50; 
 
-    for (let i = 0; i < totalRequests; i++) {
-      // Usamos no-store para evitar que el navegador cachee y nos engañe
-      fetch(EC2_IP, { cache: 'no-store' })
+    const EC2_IP = "http://107.20.11.37/"; 
+
+    // Creamos un array de promesas para dispararlas TODAS en paralelo
+    const promises = Array.from({ length: totalRequests }).map((_, i) => {
+      // El query params '?t=' evita que el navegador las ponga en fila (cache/queue)
+      return fetch(`${EC2_IP}/?t=${Date.now()}_${i}`, { cache: 'no-store' })
         .then(response => {
           if (response.status === 429) {
             addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Bloqueado por NGINX (429 Too Many Requests)`, "error")
@@ -164,12 +165,12 @@ export default function OperationsDashboard() {
           }
         })
         .catch(err => {
-          addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Ignorando CORS para prueba de estrés...`, "error")
+          addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Fallo de red`, "error")
         });
-      
-      // Una mínima pausa de 15 milisegundos para generar la "ráfaga"
-      await new Promise(resolve => setTimeout(resolve, 15))
-    }
+    });
+
+    // Esperamos a que todo el "cañonazo" termine
+    await Promise.all(promises);
 
     setTimeout(() => setIsExecutingBurst(false), 1000)
   }, [addLog])
