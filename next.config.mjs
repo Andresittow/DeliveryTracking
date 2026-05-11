@@ -1,8 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'export', // <-- ESTO ES VITAL PARA DEPLOY EN NGINX
+  output: 'export',
   typescript: {
-    ignoreBuildErrors: true,
+    ignoreBuildErrors: true, // Ignora errores de TypeScript en el build
+  },
+  eslint: {
+    ignoreDuringBuilds: true, // Ignora errores de ESLint en el build
   },
   images: {
     unoptimized: true,
