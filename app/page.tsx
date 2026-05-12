@@ -141,14 +141,12 @@ export default function OperationsDashboard() {
     setLogs([])
     setError429Count(0)
 
-    // Aumentamos a 100 para saturar definitivamente el límite del navegador y de NGINX
     const totalRequests = 100; 
-    
-    // Usamos el origin actual automáticamente (tu IP dinámica de EC2)
     const serverUrl = window.location.origin;
 
     const promises = Array.from({ length: totalRequests }).map((_, i) => {
-      return fetch(`${serverUrl}/?t=${Date.now()}_${i}`, { cache: 'no-store' })
+      // CAMBIO AQUÍ: Cambiamos `${serverUrl}/?t=...` por `${serverUrl}/api/test?t=...`
+      return fetch(`${serverUrl}/api/test?t=${Date.now()}_${i}`, { cache: 'no-store' })
         .then(response => {
           if (response.status === 429) {
             addLog(`[${new Date().toLocaleTimeString()}] Petición #${i + 1} - Bloqueado por NGINX (429 Too Many Requests)`, "error")
